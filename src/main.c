@@ -35,7 +35,8 @@ static uint8_t m_buffer[4096];
 typedef enum {
     ACTION_NONE = 0,
     ACTION_EXTRACT,
-    ACTION_CREATE
+    ACTION_CREATE,
+    ACTION_INTERACTION
 } action_t;
 
 struct options {
@@ -47,6 +48,8 @@ struct options {
     size_t block_size;
     size_t block_count;
 };
+
+extern int cli_main(void *arg);
 
 static void usage(const char *name)
 {
@@ -61,6 +64,7 @@ static void usage(const char *name)
     fprintf(stderr, "   -d <directory>         Path to root directory.\n");
     fprintf(stderr, "   -x                     Extract files from image.\n");
     fprintf(stderr, "   -c                     Create image.\n");
+	fprintf(stderr, "   -p                     Play with CLI\n");
     exit(EXIT_FAILURE);
 }
 
@@ -163,6 +167,11 @@ done:
     return result;
 }
 
+static void interact_cli(void *arg)
+{
+	printf("start cli thread...\n");
+}
+
 static int string_to_size(const char *str, size_t *size)
 {
     int result = 0;
@@ -192,7 +201,7 @@ int main(int argc, char **argv)
     struct vfs *vfs_native = NULL;
 
     int opt = 0;
-    while ((opt = getopt(argc, argv, "i:d:n:s:b:a:cxh?")) != -1) {
+    while ((opt = getopt(argc, argv, "i:d:n:s:b:a:cxph?")) != -1) {
         switch (opt) {
             case 'i':
                 options.image = optarg;
@@ -201,12 +210,16 @@ int main(int argc, char **argv)
                 options.directory = optarg;
                 break;
             case 'c': {
-                CHECK_ERROR(options.action == ACTION_NONE, 1, "REQUIRED -c OR -x");
+                CHECK_ERROR(options.action == ACTION_NONE, 1, "REQUIRED -c OR -x or -p");
                 options.action = ACTION_CREATE;
             } break;
             case 'x': {
-                CHECK_ERROR(options.action == ACTION_NONE, 1, "REQUIRED -x OR -c");
+                CHECK_ERROR(options.action == ACTION_NONE, 1, "REQUIRED -x OR -c or -p");
                 options.action = ACTION_EXTRACT;
+            } break;
+			case 'p': {
+                CHECK_ERROR(options.action == ACTION_NONE, 1, "REQUIRED -x OR -c or -p");
+                options.action = ACTION_INTERACTION;
             } break;
             case 'n': {
                 CHECK_ERROR(string_to_size(optarg, &options.name_max) == 0, 1, "string_to_size() failed");
@@ -232,9 +245,10 @@ int main(int argc, char **argv)
 
     CHECK_ERROR(optind == argc, 1, "Invalid argument count");
     CHECK_ERROR(options.image != NULL, 1, "-i required");
-    CHECK_ERROR(options.directory != NULL, 1, "-d required");
-
-    vfs_native = vfs_native_get(options.directory);
+	if (options.action != ACTION_INTERACTION) {
+    	CHECK_ERROR(options.directory != NULL, 1, "-d required");
+		vfs_native = vfs_native_get(options.directory);
+	}
 
     switch (options.action) {
         case ACTION_EXTRACT: {
@@ -256,6 +270,16 @@ int main(int argc, char **argv)
 
             traversal(vfs_native, vfs_lfs, "/");
         } break;
+		case ACTION_INTERACTION: {
+			vfs_lfs = vfs_lfs_get(options.image, false, options.name_max, options.io_size, options.block_size,
+                                  options.block_count);
+            CHECK_ERROR(vfs_lfs != NULL, 2, "vfs_lfs_get() failed");
+
+            int err = vfs_lfs->mount(vfs_lfs);
+            CHECK_ERROR(err == 0, 2, "vfs->mount() failed: %d", err);
+
+			cli_main(vfs_lfs);
+		}break;
         case ACTION_NONE:
             ERROR("REQUIRED -x OR -c");
             usage(argv[0]);

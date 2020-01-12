@@ -32,15 +32,26 @@ struct vfs_dirent {
 
 struct vfs
 {
-    void *opaque;
+	void *opaque;
+    int (*format)(struct vfs *vfs);
+    int (*mount)(struct vfs *vfs);
+    int (*unmount)(struct vfs *vfs);
+    int (*remove)(struct vfs *vfs, const char *path);
+    int (*rename)(struct vfs *vfs, const char *oldpath, const char *newpath);
+    //int (*stat)(struct vfs *vfs, const char *path, struct lfs_info *info);
+
     void *(*open)(struct vfs *vfs, const char *pathname, int flags);
     int (*close)(struct vfs *vfs, void *fd);
     int32_t (*read)(struct vfs *vfs, void *fd, void *buf, size_t count);
     int32_t (*write)(struct vfs *vfs, void *fd, const void *buf, size_t count);
-    int (*mount)(struct vfs *vfs);
-    int (*unmount)(struct vfs *vfs);
+	int (*fsync)(struct vfs *vfs, void *fd);
+
+    int32_t (*seek)(struct vfs *vfs, void *fd, int32_t off, int whence);
+    int32_t (*tell)(struct vfs *vfs, void *fd);
+
+    int (*mkdir)(struct vfs *vfs, const char *pathname);
+    struct vfs_dirent *(*readdir)(struct vfs *vfs, void *dir);
     void *(*opendir)(struct vfs *vfs, const char *path);
     int (*closedir)(struct vfs *vfs, void *dir);
-    struct vfs_dirent *(*readdir)(struct vfs *vfs, void *dir);
-    int (*mkdir)(struct vfs *vfs, const char *pathname);
+
 };

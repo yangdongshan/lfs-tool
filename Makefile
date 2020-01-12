@@ -2,22 +2,22 @@ CPPFLAGS += -MD -MP
 CPPFLAGS += -D_XOPEN_SOURCE=700
 CFLAGS += -Wall -Wextra -fexceptions -fstack-protector-strong -Werror=implicit-function-declaration
 CFLAGS += -Wfloat-equal -Wlogical-op -Wshift-overflow=2 -Wduplicated-cond -Wcast-qual -Wcast-align
-#CFLAGS += -Wconversion -fstack-clash-protection 
+#CFLAGS += -Wconversion -fstack-clash-protection
 #CFLAGS += -fsanitize=address -fsanitize=undefined
 CFLAGS += -Wno-unused-parameter
-CFLAGS += -Os -std=c11
+CFLAGS += -g -O1 -std=c11
 
 ifndef NOSTATIC
 CFLAGS += -static
 endif
 
-CXXFLAGS += $(CFLAGS)
-
-
 SRCDIR = src
 TSTDIR = tests
 BUILD_DIR = build
 
+CFLAGS += -I$(SRCDIR) -I$(SRCDIR)/cli
+
+CXXFLAGS += $(CFLAGS)
 CPPFLAGS += -I$(SRCDIR)
 
 vpath %.c $(SRCDIR)
@@ -25,6 +25,8 @@ vpath %.c $(TSTDIR)
 
 TARGET = lfs-tool
 TEST_TARGET = test
+
+LDLIBS += -lpthread
 
 MAIN = main.c
 

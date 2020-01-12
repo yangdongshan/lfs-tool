@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <pthread.h>
 
 #include "vfs.h"
 #include "lfs/lfs.h"
@@ -35,6 +36,8 @@ struct context
 {
     FILE *file;
 };
+
+static lfs_t *g_lfs = NULL;
 
 static int fs_read(const struct lfs_config *c, lfs_block_t block,
                    lfs_off_t off, void *buffer, lfs_size_t size);
@@ -58,6 +61,8 @@ static struct lfs_config m_lfs_config = {
 
 static struct context m_context = {0};
 
+static pthread_mutex_t mutex;
+
 static int fs_read(const struct lfs_config *c, lfs_block_t block,
                    lfs_off_t off, void *buffer, lfs_size_t size)
 {
@@ -70,7 +75,7 @@ static int fs_read(const struct lfs_config *c, lfs_block_t block,
     CHECK_ERROR(err == 0, -1, "fseek() failed: %d", err);
 
     size_t bytes = fread(buffer, 1, size, context->file);
-    CHECK_ERROR(bytes == size, -1, "fread() failed: off: %u, size: %u, bytes: %u", off, size, bytes);
+    CHECK_ERROR(bytes == size, -1, "fread() failed: off: %u, size: %u, bytes: %ld", off, size, bytes);
 
     //INFO("read block: %u, off: %u", block, off);
     //INFO("read offset: %u, size: %u", offset, size);
@@ -122,16 +127,131 @@ static int fs_sync(const struct lfs_config *c)
     return fflush(context->file) != EOF ? 0 : -1;
 }
 
-static void *vfs_open(struct vfs *vfs, const char *pathname, int flags)
+static int vfs_lock_init(void)
+{
+	return pthread_mutex_init(&mutex, NULL);
+}
+
+static int vfs_lock(void)
+{
+	return pthread_mutex_lock(&mutex);
+}
+
+static int vfs_unlock(void)
+{
+	return pthread_mutex_unlock(&mutex);
+}
+
+static int vfs_lock_destory(void)
+{
+	return pthread_mutex_destroy(&mutex);
+}
+
+int vfs_format(struct vfs *vfs)
+{
+    int result = 0;
+
+    lfs_t *lfs = NULL;
+
+    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
+
+    lfs = malloc(sizeof(*lfs));
+    CHECK_ERROR(lfs != NULL, -1, "format() failed");
+
+    result = lfs_format(lfs, &m_lfs_config);
+    CHECK_ERROR(result == 0, -1, "lfs_format() failed: %d", result);
+
+done:
+    if (lfs != NULL)
+		free(lfs);
+
+    return result;
+}
+
+
+int vfs_mount(struct vfs *vfs)
+{
+    int result = 0;
+
+    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
+
+	CHECK_ERROR(g_lfs == NULL, -1, "g_lfs != NULL");
+
+    g_lfs = malloc(sizeof(*g_lfs));
+    CHECK_ERROR(g_lfs != NULL, -1, "malloc() failed");
+
+	vfs_lock_init();
+
+    result = lfs_mount(g_lfs, &m_lfs_config);
+    CHECK_ERROR(result == 0, -1, "lfs_mount() failed: %d", result);
+
+done:
+    if (result != 0) {
+        free(g_lfs);
+		g_lfs = NULL;
+		vfs_lock_destory();
+    }
+    return result;
+}
+
+int vfs_unmount(struct vfs *vfs)
+{
+    int result = 0;
+
+    if (g_lfs == NULL)
+		return -1;
+
+    result = lfs_unmount(g_lfs);
+    CHECK_ERROR(result == 0, -1, "lfs_unmount() failed: %d", result);
+
+    free(g_lfs);
+	g_lfs = NULL;
+
+	vfs_lock_destory();
+
+done:
+    return result;
+}
+
+int vfs_remove(struct vfs *vfs, const char *path)
+{
+	int result;
+
+    CHECK_ERROR(path != NULL, -1, "path == NULL");
+
+	vfs_lock();
+    int err = lfs_remove(g_lfs, path);
+	vfs_unlock();
+    CHECK_ERROR(err == 0, -1, "lfs_remove() failed: %d", err);
+
+done:
+    return result;
+}
+
+int vfs_rename(struct vfs *vfs, const char *oldpath, const char *newpath)
+{
+	int result;
+
+    CHECK_ERROR(oldpath != NULL, -1, "oldpath == NULL");
+	CHECK_ERROR(newpath != NULL, -1, "newpath == NULL");
+
+	vfs_lock();
+    int err = lfs_rename(g_lfs, oldpath, newpath);
+	vfs_unlock();
+    CHECK_ERROR(err == 0, -1, "lfs_rename() failed: %d", err);
+
+done:
+    return result;
+}
+
+void *vfs_open(struct vfs *vfs, const char *pathname, int flags)
 {
     void *result = NULL;
 
     lfs_file_t *file = NULL;
 
-    CHECK_ERROR(vfs != NULL, NULL, "vfs == NULL");
     CHECK_ERROR(pathname != NULL, NULL, "pathname == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     file = malloc(sizeof(*file));
 
     CHECK_ERROR(file != NULL, NULL, "malloc() failed");
@@ -156,7 +276,10 @@ static void *vfs_open(struct vfs *vfs, const char *pathname, int flags)
         lfs_flags |= LFS_O_APPEND;
     }
 
-    int err = lfs_file_open(lfs, file, pathname, lfs_flags);
+	vfs_lock();
+    int err = lfs_file_open(g_lfs, file, pathname, lfs_flags);
+	vfs_unlock();
+
     CHECK_ERROR(err >= 0, NULL, "lfs_file_open() failed: %d", err);
 
     result = file;
@@ -168,19 +291,20 @@ done:
     return result;
 }
 
-static int vfs_close(struct vfs *vfs, void *fd)
+int vfs_close(struct vfs *vfs, void *fd)
 {
     int result = 0;
 
     lfs_file_t *file = NULL;
 
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
     CHECK_ERROR(fd != NULL, -1, "fd == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     file = fd;
 
-    int err = lfs_file_close(lfs, file);
+	vfs_lock();
+    int err = lfs_file_close(g_lfs, file);
+	vfs_unlock();
+
     CHECK_ERROR(err == 0, -1, "lfs_file_close() failed: %d", err);
 
     free(file);
@@ -189,98 +313,153 @@ done:
     return result;
 }
 
-static int32_t vfs_read(struct vfs *vfs, void *fd, void *buf, size_t count)
+int32_t vfs_read(struct vfs *vfs, void *fd, void *buf, size_t count)
 {
     int32_t result = 0;
 
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
     CHECK_ERROR(fd != NULL, -1, "fd == NULL");
     CHECK_ERROR(buf != NULL, -1, "buf == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     lfs_file_t *file = fd;
 
-    result = lfs_file_read(lfs, file, buf, count);
+	vfs_lock();
+    result = lfs_file_read(g_lfs, file, buf, count);
+	vfs_unlock();
+
     CHECK_ERROR(result >= 0, -1, "lfs_file_read() failed: %d", result);
 
 done:
     return result;
 }
 
-static int32_t vfs_write(struct vfs *vfs, void *fd, const void *buf, size_t count)
+int32_t vfs_write(struct vfs *vfs, void *fd, const void *buf, size_t count)
 {
     int32_t result = 0;
 
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
     CHECK_ERROR(fd != NULL, -1, "fd == NULL");
     CHECK_ERROR(buf != NULL, -1, "buf == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     lfs_file_t *file = fd;
 
-    result = lfs_file_write(lfs, file, buf, count);
+	vfs_lock();
+    result = lfs_file_write(g_lfs, file, buf, count);
+	vfs_unlock();
     CHECK_ERROR(result >= 0, -1, "lfs_file_write() failed: %d", result);
 
 done:
     return result;
 }
 
-static int vfs_mount(struct vfs *vfs)
+int32_t vfs_fsync(struct vfs *vfs, void *fd)
 {
-    int result = 0;
+    int32_t result = 0;
 
-    lfs_t *lfs = NULL;
+    CHECK_ERROR(fd != NULL, -1, "fd == NULL");
 
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
+    lfs_file_t *file = fd;
 
-    lfs = malloc(sizeof(*lfs));
-    CHECK_ERROR(lfs != NULL, -1, "malloc() failed");
+	vfs_lock();
+    result = lfs_file_sync(g_lfs, file);
+	vfs_unlock();
 
-    result = lfs_mount(lfs, &m_lfs_config);
-    CHECK_ERROR(result == 0, -1, "lfs_mount() failed: %d", result);
-
-done:
-    if (result != 0) {
-        free(lfs);
-    }
-    if (vfs != NULL) {
-        vfs->opaque = lfs;
-    }
-    return result;
-}
-
-static int vfs_unmount(struct vfs *vfs)
-{
-    int result = 0;
-
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
-
-    lfs_t *lfs = vfs->opaque;
-
-    result = lfs_unmount(lfs);
-    CHECK_ERROR(result == 0, -1, "lfs_unmount() failed: %d", result);
-
-    free(vfs->opaque);
+    CHECK_ERROR(result >= 0, -1, "lfs_file_sync() failed: %d", result);
 
 done:
     return result;
 }
 
-static void * vfs_opendir(struct vfs *vfs, const char *path)
+int32_t vfs_seek(struct vfs *vfs, void *fd, int32_t off, int whence)
+{
+	int32_t result = 0;
+
+    CHECK_ERROR(fd != NULL, -1, "fd == NULL");
+
+    lfs_file_t *file = fd;
+
+	vfs_lock();
+	result = lfs_file_seek(g_lfs, file, off, whence);
+	vfs_unlock();
+	CHECK_ERROR(result >= 0, -1, "lfs_file_sync() failed: %d", result);
+
+done:
+	return result;
+}
+
+
+int32_t vfs_tell(struct vfs *vfs, void *fd)
+{
+	int32_t result = 0;
+
+    CHECK_ERROR(fd != NULL, -1, "fd == NULL");
+
+    lfs_file_t *file = fd;
+
+	vfs_lock();
+	result = lfs_file_tell(g_lfs, file);
+	vfs_unlock();
+
+	CHECK_ERROR(result >= 0, -1, "lfs_file_tell() failed: %d", result);
+
+done:
+	return result;
+}
+
+int32_t vfs_stat(struct vfs *vfs, const char *path, struct stat *s)
+{
+	int32_t result = 0;
+
+    CHECK_ERROR(path != NULL, -1, "path== NULL");
+
+	struct lfs_info info;
+
+	vfs_lock();
+	result = lfs_stat(g_lfs, path, &info);
+	vfs_unlock();
+
+	if (!result) {
+		s->st_size = info.size;
+		s->st_mode = S_IRWXU | S_IRWXG | S_IRWXO |
+		             ((info.type == LFS_TYPE_DIR)? S_IFDIR: S_IFREG);
+	}
+
+	CHECK_ERROR(result >= 0, -1, "lfs_file_tell() failed: %d", result);
+
+done:
+	return result;
+}
+
+
+int vfs_mkdir(struct vfs *vfs, const char *pathname)
+{
+    int result = 0;
+
+    CHECK_ERROR(pathname != NULL, -1, "pathname == NULL");
+
+	vfs_lock();
+    int err = lfs_mkdir(g_lfs, pathname);
+	vfs_unlock();
+
+    CHECK_ERROR(err == 0 || err == LFS_ERR_EXIST, -1, "lfs_mkdir() failed: %d", err);
+
+done:
+    return result;
+}
+
+void * vfs_opendir(struct vfs *vfs, const char *path)
 {
     void *result = NULL;
 
     lfs_dir_t *dir = NULL;
 
-    CHECK_ERROR(vfs != NULL, NULL, "vfs == NULL");
     CHECK_ERROR(path != NULL, NULL, "path == NULL");
-
-    lfs_t *lfs = vfs->opaque;
 
     dir = malloc(sizeof(*dir));
     CHECK_ERROR(dir != NULL, NULL, "malloc() failed");
 
-    int err = lfs_dir_open(lfs, dir, path);
+	vfs_lock();
+    int err = lfs_dir_open(g_lfs, dir, path);
+	vfs_unlock();
+
     CHECK_ERROR(err == 0, NULL, "lfs_dir_open() failed: %d", err);
 
     result = dir;
@@ -292,17 +471,18 @@ done:
     return result;
 }
 
-static int vfs_closedir(struct vfs *vfs, void *dir)
+int vfs_closedir(struct vfs *vfs, void *dir)
 {
     int result = 0;
 
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
     CHECK_ERROR(dir != NULL, -1, "dir == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     lfs_dir_t *lfs_dir = dir;
 
-    int err = lfs_dir_close(lfs, lfs_dir);
+	vfs_lock();
+	int err = lfs_dir_close(g_lfs, lfs_dir);
+	vfs_unlock();
+
     CHECK_ERROR(err == 0, -1, "lfs_dir_close() failed: %d", err);
 
     free(lfs_dir);
@@ -311,19 +491,20 @@ done:
     return result;
 }
 
-static struct vfs_dirent* vfs_readdir(struct vfs *vfs, void *dir)
+struct vfs_dirent* vfs_readdir(struct vfs *vfs, void *dir)
 {
     struct vfs_dirent *result = NULL;
 
-    CHECK_ERROR(vfs != NULL, NULL, "vfs == NULL");
     CHECK_ERROR(dir != NULL, NULL, "dir == NULL");
 
-    lfs_t *lfs = vfs->opaque;
     lfs_dir_t *lfs_dir = dir;
 
     struct lfs_info info = {0};
 
-    int err = lfs_dir_read(lfs, lfs_dir, &info);
+	vfs_lock();
+    int err = lfs_dir_read(g_lfs, lfs_dir, &info);
+	vfs_unlock();
+
     CHECK_ERROR(err >= 0, NULL, "lfs_dir_read() failed: %d", err);
 
     static struct vfs_dirent dirent = {0};
@@ -347,33 +528,25 @@ done:
 }
 
 
-static int vfs_mkdir(struct vfs *vfs, const char *pathname)
-{
-    int result = 0;
-
-    CHECK_ERROR(vfs != NULL, -1, "vfs == NULL");
-    CHECK_ERROR(pathname != NULL, -1, "pathname == NULL");
-
-    lfs_t *lfs = vfs->opaque;
-
-    int err = lfs_mkdir(lfs, pathname);
-    CHECK_ERROR(err == 0 || err == LFS_ERR_EXIST, -1, "lfs_mkdir() failed: %d", err);
-
-done:
-    return result;
-}
-
 static struct vfs vfs_lfs = {
+	.format = vfs_format,
+    .mount = vfs_mount,
+    .unmount = vfs_unmount,
+    .remove = vfs_remove,
+    .rename = vfs_rename,
+
     .open = vfs_open,
     .close = vfs_close,
     .read = vfs_read,
     .write = vfs_write,
-    .mount = vfs_mount,
-    .unmount = vfs_unmount,
+    .fsync = vfs_fsync,
+    .seek = vfs_seek,
+    .tell = vfs_tell,
+
+	.mkdir = vfs_mkdir,
     .opendir = vfs_opendir,
     .closedir = vfs_closedir,
     .readdir = vfs_readdir,
-    .mkdir = vfs_mkdir
 };
 
 struct vfs *vfs_lfs_get(const char *image, bool write, size_t name_max, size_t io_size, size_t block_size,
